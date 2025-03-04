@@ -69,3 +69,6 @@ func (p *parser) Merge(parent interface{}, child interface{}) interface{} {
 	}
 	return &newConfig
 }
+
+func (p *parser) Destroy(config interface{}) {
+}

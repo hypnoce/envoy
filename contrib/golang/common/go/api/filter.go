@@ -108,12 +108,6 @@ func (*PassThroughStreamFilter) OnDestroy(DestroyReason) {
 func (*PassThroughStreamFilter) OnStreamComplete() {
 }
 
-type Config interface {
-	// Called when the current config is deleted due to an update or removal of plugin.
-	// You can use this method is you store some resources in the config to be released later.
-	Destroy()
-}
-
 type StreamFilterConfigParser interface {
 	// Parse the proto message to any Go value, and return error to reject the config.
 	// This is called when Envoy receives the config from the control plane.
@@ -125,6 +119,7 @@ type StreamFilterConfigParser interface {
 	// into a single one recursively, by invoking this method multiple times.
 	// You can return a config implementing the Config interface if you need fine control over its lifecycle.
 	Merge(parentConfig interface{}, childConfig interface{}) interface{}
+	Destroy(config interface{})
 }
 
 type StreamFilterFactory func(config interface{}, callbacks FilterCallbackHandler) StreamFilter

@@ -43,6 +43,9 @@ func (p *parser) Merge(parent interface{}, child interface{}) interface{} {
 	panic("TODO")
 }
 
+func (p *parser) Destroy(config interface{}) {
+}
+
 func filterFactory(c interface{}, callbacks api.FilterCallbackHandler) api.StreamFilter {
 	conf, ok := c.(*config)
 	if !ok {

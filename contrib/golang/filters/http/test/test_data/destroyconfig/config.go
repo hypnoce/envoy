@@ -27,12 +27,6 @@ type config struct {
 	cb api.ConfigCallbackHandler
 }
 
-func (c *config) Destroy() {
-	// call cApi.HttpDefineMetric to store the config pointer
-	c.cb.DefineCounterMetric("")
-	C.envoyGoConfigDestroy(cfgPointer)
-}
-
 type capi struct {
 	api.HttpCAPI
 }
@@ -52,4 +46,10 @@ func (p *parser) Parse(_ *anypb.Any, cb api.ConfigCallbackHandler) (interface{},
 	http.SetHttpCAPI(&capi{})
 	conf := &config{cb}
 	return conf, nil
+}
+
+func (p *parser) Destroy(c interface{}) {
+	// call cApi.HttpDefineMetric to store the config pointer
+	c.(*config).cb.DefineCounterMetric("")
+	C.envoyGoConfigDestroy(cfgPointer)
 }
