@@ -34,7 +34,8 @@ Http::FilterFactoryCb GolangFilterConfig::createFilterFactoryFromProtoTyped(
   FilterConfigSharedPtr config = std::make_shared<FilterConfig>(
       proto_config, dso_lib, fmt::format("{}golang.", stats_prefix), context);
   config->newGoPluginConfig();
-  return [config, dso_lib](Http::FilterChainFactoryCallbacks& callbacks) {
+  auto& cluster_manager = context.serverFactoryContext().clusterManager();
+  return [config, dso_lib, &cluster_manager](Http::FilterChainFactoryCallbacks& callbacks) {
     const std::string& worker_name = callbacks.dispatcher().name();
     auto pos = worker_name.find_first_of('_');
     ENVOY_BUG(pos != std::string::npos, "worker name is not in expected format worker_{id}");
@@ -42,7 +43,8 @@ Http::FilterFactoryCb GolangFilterConfig::createFilterFactoryFromProtoTyped(
     if (!absl::SimpleAtoi(worker_name.substr(pos + 1), &worker_id)) {
       IS_ENVOY_BUG("failed to parse worker id from name");
     }
-    auto filter = std::make_shared<Filter>(config, dso_lib, worker_id);
+    auto filter = std::make_shared<Filter>(config, dso_lib, worker_id, callbacks.dispatcher(),
+                                           cluster_manager);
     callbacks.addStreamFilter(filter);
     callbacks.addAccessLogHandler(filter);
   };

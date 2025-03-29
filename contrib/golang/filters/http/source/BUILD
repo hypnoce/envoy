@@ -16,10 +16,12 @@ envoy_cc_library(
     name = "golang_filter_lib",
     srcs = [
         "golang_filter.cc",
+        "http_call.cc",
         "processor_state.cc",
     ],
     hdrs = [
         "golang_filter.h",
+        "http_call.h",
         "processor_state.h",
         "stats.h",
     ],
@@ -77,6 +79,7 @@ envoy_cc_library(
     srcs = ["cgo.cc"],
     hdrs = [
         "golang_filter.h",
+        "http_call.h",
         "processor_state.h",
         "stats.h",
     ],

@@ -35,6 +35,7 @@ import (
 	"errors"
 	"runtime"
 	"strings"
+	"time"
 	"unsafe"
 
 	"google.golang.org/protobuf/proto"
@@ -113,6 +114,21 @@ func capiStatusToErr(status C.CAPIStatus) error {
 	return errors.New("unknown status")
 }
 
+func goHeadersToCHeaders(headers map[string][]string) ([]string, func()) {
+	var pinner runtime.Pinner
+	hLen := len(headers)
+	strs := make([]string, 0, hLen*2)
+	// Pinning strs is not enough as golang does not garantee transitive pointer pinngin
+	for k, h := range headers {
+		for _, v := range h {
+			pinner.Pin(unsafe.StringData(k))
+			pinner.Pin(unsafe.StringData(v))
+			strs = append(strs, k, v)
+		}
+	}
+	return strs, pinner.Unpin
+}
+
 func (c *httpCApiImpl) HttpContinue(s unsafe.Pointer, status uint64) {
 	state := (*processState)(s)
 	res := C.envoyGoFilterHttpContinue(unsafe.Pointer(state.processState), C.int(status))
@@ -123,21 +139,8 @@ func (c *httpCApiImpl) HttpContinue(s unsafe.Pointer, status uint64) {
 // won't panic with errInvalidPhase and others, otherwise will cause deadloop, see RecoverPanic for the details.
 func (c *httpCApiImpl) HttpSendLocalReply(s unsafe.Pointer, responseCode int, bodyText string, headers map[string][]string, grpcStatus int64, details string) {
 	state := (*processState)(s)
-	hLen := len(headers)
-	strs := make([]*C.char, 0, hLen*2)
-	defer func() {
-		for _, s := range strs {
-			C.free(unsafe.Pointer(s))
-		}
-	}()
-	// TODO: use runtime.Pinner after go1.22 release for better performance.
-	for k, h := range headers {
-		for _, v := range h {
-			keyStr := C.CString(k)
-			valueStr := C.CString(v)
-			strs = append(strs, keyStr, valueStr)
-		}
-	}
+	strs, cleanup := goHeadersToCHeaders(headers)
+	defer cleanup()
 	res := C.envoyGoFilterHttpSendLocalReply(unsafe.Pointer(state.processState), C.int(responseCode),
 		unsafe.Pointer(unsafe.StringData(bodyText)), C.int(len(bodyText)),
 		unsafe.Pointer(unsafe.SliceData(strs)), C.int(len(strs)),
@@ -203,7 +206,6 @@ func (c *httpCApiImpl) HttpCopyHeaders(s unsafe.Pointer, num uint64, bytes uint6
 			m[key] = append(v, value)
 		}
 	}
-	runtime.KeepAlive(buf)
 	return m
 }
 
@@ -294,7 +296,6 @@ func (c *httpCApiImpl) HttpCopyTrailers(s unsafe.Pointer, num uint64, bytes uint
 			m[key] = append(v, value)
 		}
 	}
-	runtime.KeepAlive(buf)
 	return m
 }
 
@@ -396,6 +397,49 @@ func (c *httpCApiImpl) HttpSetDynamicMetadata(r unsafe.Pointer, filterName strin
 func (c *httpCApiImpl) HttpFinalize(r unsafe.Pointer, reason int) {
 	req := (*httpRequest)(r)
 	C.envoyGoFilterHttpFinalize(unsafe.Pointer(req.req), C.int(reason))
+}
+
+func (c *httpCApiImpl) HttpHttpCall(r unsafe.Pointer, clusterName string,
+	method string,
+	path string,
+	requestHeaders map[string][]string,
+	body string,
+	requestTrailers map[string][]string,
+	timeout time.Duration) (api.HttpCallResponse, bool, error) {
+
+	req := (*httpRequest)(r)
+	req.mutex.Lock()
+	defer req.mutex.Unlock()
+	// Http request is async
+	req.markMayWaitingCallback()
+
+	requestHeaders[":method"] = []string{method}
+	requestHeaders[":path"] = []string{path}
+	c_headers, unpinHeaders := goHeadersToCHeaders(requestHeaders)
+	defer unpinHeaders()
+	c_trailers, unpinTrailers := goHeadersToCHeaders(requestTrailers)
+	defer unpinTrailers()
+
+	var httpCallId C.int
+	var rc C.int
+
+	//CAPIStatus envoyGoFilterHttpHttpCall(void* r, void* headers, int headers_num, void* body_text_data,
+	// int body_text_len, void* trailers, int trailers_num,
+	// long long int timeout_milliseconds);
+	res := C.envoyGoFilterHttpHttpCall(unsafe.Pointer(req.req),
+		unsafe.Pointer(unsafe.StringData(clusterName)), C.int(len(clusterName)),
+		unsafe.Pointer(unsafe.SliceData(c_headers)), C.int(len(c_headers)),
+		unsafe.Pointer(unsafe.StringData(body)), C.int(len(body)),
+		unsafe.Pointer(unsafe.SliceData(c_trailers)), C.int(len(c_trailers)),
+		C.longlong(timeout.Milliseconds()), &httpCallId, &rc)
+	if res == C.CAPIYield {
+		req.checkOrWaitCallback()
+	} else {
+		req.markNoWaitingCallback()
+		handleCApiStatus(res)
+	}
+	return nil, true, nil
+
 }
 
 func (c *httpCApiImpl) HttpSetStringFilterState(r unsafe.Pointer, key string, value string, stateType api.StateType, lifeSpan api.LifeSpan, streamSharing api.StreamSharing) {

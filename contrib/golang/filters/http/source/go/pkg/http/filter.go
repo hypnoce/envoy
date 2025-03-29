@@ -36,6 +36,7 @@ import (
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/envoyproxy/envoy/contrib/golang/common/go/api"
@@ -290,6 +291,30 @@ func (r *httpRequest) SecretManager() api.SecretManager {
 
 func (r *httpRequest) GetGenericSecret(name string) (string, bool) {
 	return cAPI.HttpGetStringSecret(unsafe.Pointer(r), name)
+}
+
+func (r *httpRequest) HttpCall(
+	clusterName string,
+	method string,
+	path string,
+	requestHeaders map[string][]string,
+	body string,
+	requestTrailers map[string][]string,
+	timeout time.Duration,
+) (api.HttpCallResponse, bool, error) {
+	return cAPI.HttpHttpCall(unsafe.Pointer(r), clusterName, method, path, requestHeaders, body, requestTrailers, timeout)
+}
+
+func (s *processState) HttpCall(
+	clusterName string,
+	method string,
+	path string,
+	requestHeaders map[string][]string,
+	body string,
+	requestTrailers map[string][]string,
+	timeout time.Duration,
+) (api.HttpCallResponse, bool, error) {
+	return s.request.HttpCall(clusterName, method, path, requestHeaders, body, requestTrailers, timeout)
 }
 
 type streamInfo struct {

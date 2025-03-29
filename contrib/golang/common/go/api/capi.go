@@ -17,7 +17,10 @@
 
 package api
 
-import "unsafe"
+import (
+	"time"
+	"unsafe"
+)
 
 type HttpCAPI interface {
 	/* These APIs are related to the decode/encode phase, use the pointer of processState. */
@@ -60,6 +63,14 @@ type HttpCAPI interface {
 
 	HttpFinalize(r unsafe.Pointer, reason int)
 	HttpGetStringSecret(c unsafe.Pointer, key string) (string, bool)
+
+	HttpHttpCall(r unsafe.Pointer, clusterName string,
+		method string,
+		path string,
+		requestHeaders map[string][]string,
+		body string,
+		requestTrailers map[string][]string,
+		timeout time.Duration) (HttpCallResponse, bool, error)
 
 	/* These APIs are related to config, use the pointer of config. */
 	HttpDefineMetric(c unsafe.Pointer, metricType MetricType, name string) uint32

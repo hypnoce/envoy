@@ -17,7 +17,11 @@
 
 package api
 
-import "google.golang.org/protobuf/types/known/anypb"
+import (
+	"time"
+
+	"google.golang.org/protobuf/types/known/anypb"
+)
 
 type (
 	// PassThroughStreamEncoderFilter provides the no-op implementation of the StreamEncoderFilter interface.
@@ -206,6 +210,16 @@ type FilterProcessCallbacks interface {
 	AddData(data []byte, isStreaming bool)
 	// InjectData inject the content of slice data via Envoy StreamXXFilterCallbacks's injectXXDataToFilterChaininjectData.
 	InjectData(data []byte)
+
+	HttpCall(
+		clusterName string,
+		method string,
+		path string,
+		requestHeaders map[string][]string,
+		body string,
+		requestTrailers map[string][]string,
+		timeout time.Duration,
+	) (HttpCallResponse, bool, error)
 }
 
 type DecoderFilterCallbacks interface {

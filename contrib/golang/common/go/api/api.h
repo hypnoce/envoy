@@ -38,6 +38,15 @@ typedef struct httpRequest { // NOLINT(modernize-use-using)
   _Atomic(int) is_golang_processing_log;
 } httpRequest;
 
+typedef struct httpCallResponse { // NOLINT(modernize-use-using)
+  uint64_t call_id;
+  uint64_t headers_num;
+  uint64_t headers_bytes;
+  uint64_t trailers_num;
+  uint64_t trailers_bytes;
+  uint64_t body_bytes;
+} httpCallResponse;
+
 typedef struct { // NOLINT(modernize-use-using)
   uint64_t plugin_name_ptr;
   uint64_t plugin_name_len;
@@ -120,6 +129,11 @@ CAPIStatus envoyGoFilterHttpGetStringProperty(void* r, void* key_data, int key_l
                                               uint64_t* value_data, int* value_len, int* rc);
 CAPIStatus envoyGoFilterHttpGetStringSecret(void* r, void* key_data, int key_len,
                                             uint64_t* value_data, int* value_len);
+CAPIStatus envoyGoFilterHttpHttpCall(void* r, void* cluster_name_data, int cluster_name_len,
+                                     void* headers, int headers_num, void* body_text_data,
+                                     int body_text_len, void* trailers, int trailers_num,
+                                     long long int timeout_milliseconds, int* http_call_id,
+                                     int* rc);
 
 /* These APIs have nothing to do with request */
 void envoyGoFilterLog(uint32_t level, void* message_data, int message_len);

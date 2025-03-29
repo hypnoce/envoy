@@ -1,9 +1,11 @@
 #include "contrib/golang/filters/http/source/golang_filter.h"
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "envoy/http/codes.h"
@@ -19,6 +21,7 @@
 #include "source/common/grpc/status.h"
 #include "source/common/http/headers.h"
 #include "source/common/http/http1/codec_impl.h"
+#include "source/common/http/message_impl.h"
 #include "source/common/http/utility.h"
 #include "source/common/router/string_accessor_impl.h"
 #include "source/extensions/filters/common/expr/context.h"
@@ -153,6 +156,9 @@ void Filter::onDestroy() {
 
   {
     Thread::LockGuard lock(mutex_);
+    for (auto& p : http_calls_) {
+      p.second.request_->cancel();
+    }
     if (has_destroyed_) {
       ENVOY_LOG(debug, "golang filter has been destroyed");
       return;
@@ -1513,6 +1519,112 @@ uint64_t Filter::getMergedConfigId() {
   }
 
   return id;
+}
+
+/* http calls */
+
+Http::RequestTrailerMapPtr buildRequestTrailerMapFromPairs(Pairs& pairs) {
+  auto map = Http::RequestTrailerMapImpl::create();
+  for (const auto& p : pairs) {
+    map->addCopy(Http::LowerCaseString(p.first), p.second);
+  }
+  return map;
+}
+
+Http::RequestHeaderMapPtr buildRequestHeaderMapFromPairs(Pairs& pairs) {
+  auto map = Http::RequestHeaderMapImpl::create();
+  for (const auto& p : pairs) {
+    map->addCopy(Http::LowerCaseString(p.first), p.second);
+  }
+  return map;
+}
+
+CAPIStatus Filter::httpCall(absl::string_view cluster, Pairs& headers,
+                            absl::string_view request_body, Pairs& trailers,
+                            std::chrono::milliseconds timeout_milliseconds, int* http_call_id,
+                            int* rc) {
+  // lock until this function return since it may running in a Go thread.
+  Thread::LockGuard lock(mutex_);
+  if (has_destroyed_) {
+    ENVOY_LOG(debug, "golang filter has been destroyed");
+    return CAPIStatus::CAPIFilterIsDestroy;
+  }
+
+  // Build message here to avoid unecessary copy when capturing values in the dispatcher.
+  // Request message copies the headers, body and trailers.
+  auto message = Http::RequestMessagePtr{
+      new Http::RequestMessageImpl(buildRequestHeaderMapFromPairs(headers))};
+
+  if (message->headers().Path() == nullptr || message->headers().Method() == nullptr ||
+      message->headers().Host() == nullptr) {
+    ENVOY_LOG(debug, "invalid argument for http request on cluster {}", cluster);
+    return CAPIStatus::CAPIInternalFailure;
+  }
+
+  if (!request_body.empty()) {
+    message->body().add(request_body);
+    message->headers().setContentLength(request_body.size());
+  }
+
+  if (!trailers.empty()) {
+    message->trailers(buildRequestTrailerMapFromPairs(trailers));
+  }
+
+  if (isThreadSafe()) {
+    return httpCallInternal(cluster, std::move(message), timeout_milliseconds, http_call_id);
+  } else {
+    auto weak_ptr = weak_from_this();
+    getDispatcher().post([this, weak_ptr, cluster = std::string(cluster),
+                          message = std::move(message), timeout_milliseconds, http_call_id,
+                          rc]() mutable {
+      if (auto this_ = weak_ptr.lock()) {
+        // while very unlikely, ensure unique_ptr was not moved by previous call
+        auto message_ptr = std::move(message);
+        if (message_ptr && !hasDestroyed()) {
+          auto status =
+              httpCallInternal(cluster, std::move(message_ptr), timeout_milliseconds, http_call_id);
+          if (status != CAPIStatus::CAPIYield) {
+            *rc = status;
+            dynamic_lib_->envoyGoRequestSemaDec(req_);
+          }
+        } else {
+          ENVOY_LOG(info, "golang filter has gone or destroyed in httpCall");
+        }
+      }
+    });
+    return CAPIStatus::CAPIYield;
+  }
+}
+
+CAPIStatus Filter::httpCallInternal(absl::string_view cluster, Http::RequestMessagePtr&& message,
+                                    std::chrono::milliseconds timeout_milliseconds,
+                                    int* http_call_id) {
+  Thread::LockGuard lock(mutex_);
+  const auto thread_local_cluster = cluster_manager_.getThreadLocalCluster(cluster);
+  if (thread_local_cluster == nullptr) {
+    ENVOY_LOG(debug, "no cluster found for {}", cluster);
+    return CAPIStatus::CAPIInternalFailure;
+  }
+
+  Http::AsyncClient::RequestOptions options;
+  options.setTimeout(timeout_milliseconds);
+  options.setSendXff(false);
+
+  // TODO: use counter
+  auto call_id = nextHttpCallId();
+  auto& cb = http_calls_[call_id];
+  cb.weak_filter_ = weak_from_this();
+  cb.call_id_ = call_id;
+  *http_call_id = call_id;
+
+  auto http_request = thread_local_cluster->httpAsyncClient().send(std::move(message), cb, options);
+  if (http_request == nullptr) {
+    http_calls_.erase(call_id);
+    ENVOY_LOG(debug, "failed sending request to cluster {}", cluster);
+    return CAPIStatus::CAPIInternalFailure;
+  }
+  cb.request_ = http_request;
+  return CAPIStatus::CAPIYield;
 }
 
 /*** FilterConfig ***/

@@ -169,6 +169,12 @@ type ResponseTrailerMap interface {
 	// others
 }
 
+type HttpCallResponse interface {
+	Headers() ResponseHeaderMap
+	Body() BufferInstance
+	Trailers() ResponseTrailerMap
+}
+
 type MetadataMap interface {
 }
 

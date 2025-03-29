@@ -477,3 +477,19 @@ func (b *httpBuffer) SetString(s string) error {
 	b.length = uint64(len(s))
 	return nil
 }
+
+type httpCallResponseImpl struct {
+	callId int
+}
+
+func (c *httpCallResponseImpl) Headers() api.ResponseHeaderMap {
+	return nil
+}
+
+func (c *httpCallResponseImpl) Trailers() api.ResponseTrailerMap {
+	return nil
+}
+
+func (c *httpCallResponseImpl) Body() api.BufferInstance {
+	return nil
+}

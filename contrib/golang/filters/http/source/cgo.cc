@@ -1,3 +1,5 @@
+#include <utility>
+
 #include "contrib/golang/filters/http/source/golang_filter.h"
 
 namespace Envoy {
@@ -24,25 +26,17 @@ absl::string_view stringViewFromGoPointer(void* p, int len) {
   return {static_cast<const char*>(p), static_cast<size_t>(len)};
 }
 
-absl::string_view stringViewFromGoSlice(void* slice) {
-  if (slice == nullptr) {
-    return "";
-  }
-  auto go_slice = reinterpret_cast<GoSlice*>(slice);
-  return {static_cast<const char*>(go_slice->data), static_cast<size_t>(go_slice->len)};
-}
-
-std::vector<std::string> stringsFromGoSlice(void* slice_data, int slice_len) {
-  std::vector<std::string> list;
+template <typename T>
+std::vector<std::pair<T, T>> stringsFromGoStringSlice(void* slice_data, int slice_len) {
+  std::vector<std::pair<T, T>> list;
   if (slice_len == 0) {
     return list;
   }
-  auto strs = reinterpret_cast<char**>(slice_data);
+  auto strs = reinterpret_cast<GoString*>(slice_data);
   for (auto i = 0; i < slice_len; i += 2) {
-    auto key = std::string(strs[i + 0]);
-    auto value = std::string(strs[i + 1]);
-    list.push_back(key);
-    list.push_back(value);
+    auto key = T(strs[i + 0].p, strs[i + 0].n);
+    auto value = T(strs[i + 1].p, strs[i + 1].n);
+    list.push_back(std::make_pair(key, value));
   }
   return list;
 }
@@ -107,14 +101,12 @@ CAPIStatus envoyGoFilterHttpSendLocalReply(void* s, int response_code, void* bod
       [response_code, body_text_data, body_text_len, headers, headers_num, grpc_status,
        details_data,
        details_len](std::shared_ptr<Filter>& filter, ProcessorState& state) -> CAPIStatus {
-        auto header_values = stringsFromGoSlice(headers, headers_num);
+        auto header_values = stringsFromGoStringSlice<std::string>(headers, headers_num);
         std::function<void(Http::ResponseHeaderMap&)> modify_headers =
             [header_values](Http::ResponseHeaderMap& headers) -> void {
-          for (size_t i = 0; i < header_values.size(); i += 2) {
-            const auto& key = header_values[i];
-            const auto& value = header_values[i + 1];
-            if (value.length() > 0) {
-              headers.addCopy(Http::LowerCaseString(key), value);
+          for (const auto& header_value : header_values) {
+            if (header_value.second.length() > 0) {
+              headers.addCopy(Http::LowerCaseString(header_value.first), header_value.second);
             }
           }
         };
@@ -367,6 +359,25 @@ CAPIStatus envoyGoFilterHttpGetStringSecret(void* r, void* key_data, int key_len
       r, [key_data, key_len, value_data, value_len](std::shared_ptr<Filter>& filter) -> CAPIStatus {
         auto key_str = stringViewFromGoPointer(key_data, key_len);
         return filter->getSecret(key_str, value_data, value_len);
+      });
+}
+
+CAPIStatus envoyGoFilterHttpHttpCall(void* r, void* cluster_name_data, int cluster_name_len,
+                                     void* headers, int headers_num, void* body_text_data,
+                                     int body_text_len, void* trailers, int trailers_num,
+                                     long long int timeout_milliseconds, int* http_call_id,
+                                     int* rc) {
+  return envoyGoFilterHandlerWrapper(
+      r,
+      [cluster_name_data, cluster_name_len, headers, headers_num, body_text_data, body_text_len,
+       trailers, trailers_num, timeout_milliseconds, http_call_id,
+       rc](std::shared_ptr<Filter>& filter) -> CAPIStatus {
+        auto headers_value = stringsFromGoStringSlice<absl::string_view>(headers, headers_num);
+        auto trailers_value = stringsFromGoStringSlice<absl::string_view>(trailers, trailers_num);
+        auto cluster_name = stringViewFromGoPointer(cluster_name_data, cluster_name_len);
+        auto body = stringViewFromGoPointer(body_text_data, body_text_len);
+        return filter->httpCall(cluster_name, headers_value, body, trailers_value,
+                                std::chrono::milliseconds(timeout_milliseconds), http_call_id, rc);
       });
 }
 

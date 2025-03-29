@@ -17,6 +17,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/types/optional.h"
 #include "contrib/envoy/extensions/filters/http/golang/v3alpha/golang.pb.h"
+#include "contrib/golang/filters/http/source/http_call.h"
 #include "contrib/golang/filters/http/source/processor_state.h"
 #include "contrib/golang/filters/http/source/stats.h"
 
@@ -73,7 +74,7 @@ private:
  * Configuration for the HTTP golang extension filter.
  */
 class FilterConfig : public std::enable_shared_from_this<FilterConfig>,
-                     Logger::Loggable<Logger::Id::http> {
+                     Logger::Loggable<Logger::Id::golang> {
 public:
   FilterConfig(const envoy::extensions::filters::http::golang::v3alpha::Config& proto_config,
                Dso::HttpFilterDsoPtr dso_lib, const std::string& stats_prefix,
@@ -116,7 +117,7 @@ private:
 using FilterConfigSharedPtr = std::shared_ptr<FilterConfig>;
 
 class RoutePluginConfig : public std::enable_shared_from_this<RoutePluginConfig>,
-                          Logger::Loggable<Logger::Id::http> {
+                          Logger::Loggable<Logger::Id::golang> {
 public:
   RoutePluginConfig(const std::string plugin_name,
                     const envoy::extensions::filters::http::golang::v3alpha::RouterPlugin& config);
@@ -145,7 +146,7 @@ using RoutePluginConfigPtr = std::shared_ptr<RoutePluginConfig>;
  * Route configuration for the filter.
  */
 class FilterConfigPerRoute : public Router::RouteSpecificFilterConfig,
-                             Logger::Loggable<Logger::Id::http> {
+                             Logger::Loggable<Logger::Id::golang> {
 public:
   FilterConfigPerRoute(const envoy::extensions::filters::http::golang::v3alpha::ConfigsPerRoute&,
                        Server::Configuration::ServerFactoryContext&);
@@ -219,16 +220,19 @@ private:
 /**
  * See docs/configuration/http_filters/golang_extension_filter.rst
  */
+using Pairs = std::vector<std::pair<absl::string_view, absl::string_view>>;
 class Filter : public Http::StreamFilter,
                public std::enable_shared_from_this<Filter>,
                public Filters::Common::Expr::StreamActivation,
-               Logger::Loggable<Logger::Id::http>,
+               Logger::Loggable<Logger::Id::golang>,
                public AccessLog::Instance {
 public:
   explicit Filter(FilterConfigSharedPtr config, Dso::HttpFilterDsoPtr dynamic_lib,
-                  uint32_t worker_id)
+                  uint32_t worker_id, Event::Dispatcher& dispatcher,
+                  Upstream::ClusterManager& cluster_manager)
       : config_(config), dynamic_lib_(dynamic_lib), req_(new HttpRequestInternal(*this)),
-        decoding_state_(req_->decodingState()), encoding_state_(req_->encodingState()) {
+        decoding_state_(req_->decodingState()), encoding_state_(req_->encodingState()),
+        dispatcher_(dispatcher), cluster_manager_(cluster_manager) {
     // req is used by go, so need to use raw memory and then it is safe to release at the gc
     // finalize phase of the go object.
     req_->plugin_name.data = config_->pluginName().data();
@@ -250,8 +254,6 @@ public:
   Http::FilterTrailersStatus decodeTrailers(Http::RequestTrailerMap&) override;
   void setDecoderFilterCallbacks(Http::StreamDecoderFilterCallbacks& callbacks) override {
     decoding_state_.setDecoderFilterCallbacks(callbacks);
-    // We initializes dispatcher as soon as it is available.
-    dispatcher_ = &callbacks.dispatcher();
   }
 
   // Http::StreamEncoderFilter
@@ -313,6 +315,9 @@ public:
   CAPIStatus getStringProperty(absl::string_view path, uint64_t* value_data, int* value_len,
                                GoInt32* rc);
   CAPIStatus getSecret(absl::string_view key, uint64_t* value_data, int* value_len);
+  CAPIStatus httpCall(absl::string_view cluster, Pairs& headers, absl::string_view request_body,
+                      Pairs& trailers, std::chrono::milliseconds timeout_milliseconds,
+                      int* http_call_id, int* rc);
 
   bool isProcessingInGo() {
     return decoding_state_.isProcessingInGo() || encoding_state_.isProcessingInGo();
@@ -320,6 +325,22 @@ public:
   void deferredDeleteRequest(HttpRequestInternal* req);
 
 private:
+  class HttpCallback : public httpCallResponse,
+                      public Http::AsyncClient::Callbacks,
+                      public Logger::Loggable<Logger::Id::golang> {
+  public:
+    HttpCallback() = default;
+    void onSuccess(const Http::AsyncClient::Request& request,
+                  Http::ResponseMessagePtr&& response) override;
+    void onFailure(const Http::AsyncClient::Request& request,
+                  Http::AsyncClient::FailureReason reason) override;
+    void onBeforeFinalizeUpstreamSpan(Envoy::Tracing::Span& span,
+                                      const Http::ResponseHeaderMap* response_headers) override;
+    std::weak_ptr<Filter> weak_filter_;
+    Http::AsyncClient::Request* request_;
+    uint32_t call_id_;
+    Envoy::Http::ResponseMessagePtr response_;
+  };
   bool hasDestroyed() {
     Thread::LockGuard lock(mutex_);
     return has_destroyed_;
@@ -327,7 +348,7 @@ private:
   const StreamInfo::StreamInfo& streamInfo() const { return decoding_state_.streamInfo(); }
   StreamInfo::StreamInfo& streamInfo() { return decoding_state_.streamInfo(); }
   bool isThreadSafe() { return decoding_state_.isThreadSafe(); };
-  Event::Dispatcher& getDispatcher() { return *dispatcher_; }
+  Event::Dispatcher& getDispatcher() { return dispatcher_; }
 
   bool doHeaders(ProcessorState& state, Http::RequestOrResponseHeaderMap& headers, bool end_stream);
   GolangStatus doHeadersGo(ProcessorState& state, Http::RequestOrResponseHeaderMap& headers,
@@ -361,6 +382,9 @@ private:
   absl::optional<google::api::expr::runtime::CelValue> findValue(absl::string_view name,
                                                                  Protobuf::Arena* arena);
   CAPIStatus serializeStringValue(Filters::Common::Expr::CelValue value, std::string* result);
+  CAPIStatus httpCallInternal(absl::string_view cluster, Http::RequestMessagePtr&& message,
+                              std::chrono::milliseconds timeout_milliseconds, int* http_call_id);
+  uint32_t nextHttpCallId() { return ++next_http_call_id_; }
 
   const FilterConfigSharedPtr config_;
   Dso::HttpFilterDsoPtr dynamic_lib_;
@@ -378,12 +402,18 @@ private:
   DecodingProcessorState& decoding_state_;
   EncodingProcessorState& encoding_state_;
 
-  Event::Dispatcher* dispatcher_;
+  Event::Dispatcher& dispatcher_;
+
+  // http/grpc client
+  Upstream::ClusterManager& cluster_manager_;
+  // we need pointer stability since we are taking persitent reference to callback
+  absl::node_hash_map<uint32_t, HttpCallback> http_calls_;
 
   // lock for has_destroyed_/etc, to avoid race between envoy c thread and go thread (when calling
   // back from go).
   Thread::MutexBasicLockable mutex_{};
   bool has_destroyed_ ABSL_GUARDED_BY(mutex_){false};
+  std::atomic<uint32_t> next_http_call_id_{0};
 };
 
 struct httpConfigInternal : httpConfig {
